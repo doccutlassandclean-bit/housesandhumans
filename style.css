@@ -494,6 +494,103 @@ body.lightbox-open {
   overflow: hidden;
 }
 
+/* ---------- First-time sign-in gate ---------- */
+.sign-in-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #000;
+}
+.sign-in-overlay.hidden {
+  display: none;
+}
+.sign-in-card {
+  width: 100%;
+  max-width: 470px;
+  max-height: 92vh;
+  overflow-y: auto;
+  background: linear-gradient(180deg, var(--bg-panel), var(--bg-panel-2));
+  border: 1px solid var(--gold);
+  border-radius: 10px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.9);
+  padding: 26px 26px 20px;
+  animation: sign-in-rise 0.25s ease-out;
+}
+@keyframes sign-in-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.sign-in-title {
+  margin: 0 0 4px;
+  font-size: 1.5rem;
+  color: var(--gold);
+}
+.sign-in-sub {
+  margin: 0 0 14px;
+  color: var(--parchment-dim);
+  font-size: 0.92rem;
+}
+.sign-in-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 14px 0 0;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--parchment-dim);
+}
+.sign-in-label input {
+  width: 100%;
+  font-size: 15px;
+  padding: 9px 11px;
+}
+.sign-in-label input:focus {
+  outline: none;
+  border-color: var(--gold);
+}
+.sign-in-help {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px dashed rgba(212, 175, 55, 0.4);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: var(--parchment-dim);
+  line-height: 1.5;
+}
+.sign-in-help strong {
+  color: var(--gold);
+}
+.sign-in-help ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+.sign-in-help li {
+  margin: 3px 0;
+}
+.sign-in-message {
+  margin: 12px 0 0;
+  font-size: 0.9rem;
+}
+.sign-in-btn {
+  width: 100%;
+  margin-top: 16px;
+}
+.sign-in-note {
+  margin: 10px 0 0;
+  text-align: center;
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--parchment-dim);
+}
+body.sign-in-open {
+  overflow: hidden;
+}
+
 /* ---------- Adventure gallery sidebar ---------- */
 .gallery-sidebar {
   width: 290px;

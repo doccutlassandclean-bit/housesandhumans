@@ -44,6 +44,14 @@ const baseUrlInput = document.getElementById("baseUrlInput");
 const modelIdInput = document.getElementById("modelIdInput");
 const apiKeyInput = document.getElementById("apiKeyInput");
 
+const signInOverlay = document.getElementById("signInOverlay");
+const signInForm = document.getElementById("signInForm");
+const signInBaseUrl = document.getElementById("signInBaseUrl");
+const signInApiKey = document.getElementById("signInApiKey");
+const signInModelId = document.getElementById("signInModelId");
+const signInMessage = document.getElementById("signInMessage");
+const signInTestBtn = document.getElementById("signInTestBtn");
+
 const voiceToggleBtn = document.getElementById("voiceToggleBtn");
 const voiceEnabledInput = document.getElementById("voiceEnabledInput");
 const voiceSelectInput = document.getElementById("voiceSelectInput");
@@ -96,6 +104,9 @@ function init() {
   renderMessages();
   setGalleryOpen(localStorage.getItem("dnd_galleryOpen") !== "0");
   updateConnectionPill(state.apiKey ? "unknown" : "error", state.apiKey ? "Not tested" : "No API key set");
+
+  // First-time gate: no API key saved yet -> block the page behind sign-in.
+  if (!state.apiKey) showSignIn();
 
   voiceEnabledInput.checked = state.voiceEnabled;
   voiceRateInput.value = state.voiceRate;
@@ -1236,11 +1247,8 @@ saveSettingsBtn.addEventListener("click", () => {
   setTimeout(closeModal, 700);
 });
 
-testConnectionBtn.addEventListener("click", async () => {
-  settingsMessage.classList.remove("hidden");
-  settingsMessage.textContent = "Testing connection...";
-  const baseUrl = baseUrlInput.value.trim().replace(/\/+$/, "") || DEFAULT_BASE_URL;
-  const apiKey = apiKeyInput.value.trim();
+// Shared connection test: used by the Settings panel and the sign-in gate.
+async function runConnectionTest(baseUrl, apiKey) {
   try {
     const res = await fetch(`${baseUrl}/api/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -1248,12 +1256,81 @@ testConnectionBtn.addEventListener("click", async () => {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const count = Array.isArray(data?.data) ? data.data.length : Array.isArray(data) ? data.length : "?";
-    settingsMessage.textContent = `✅ Connected! Found ${count} model(s).`;
-    updateConnectionPill("ok", "Connected");
+    return { ok: true, message: `✅ Connected! Found ${count} model(s).` };
   } catch (err) {
-    settingsMessage.textContent = `❌ Connection failed: ${err.message}`;
-    updateConnectionPill("error", "Connection failed");
+    return { ok: false, message: `❌ Connection failed: ${err.message}` };
   }
+}
+
+testConnectionBtn.addEventListener("click", async () => {
+  settingsMessage.classList.remove("hidden");
+  settingsMessage.textContent = "Testing connection...";
+  const baseUrl = baseUrlInput.value.trim().replace(/\/+$/, "") || DEFAULT_BASE_URL;
+  const apiKey = apiKeyInput.value.trim();
+  const result = await runConnectionTest(baseUrl, apiKey);
+  settingsMessage.textContent = result.message;
+  updateConnectionPill(result.ok ? "ok" : "error", result.ok ? "Connected" : "Connection failed");
+});
+
+// ---------- First-time sign-in gate ----------
+function showSignIn() {
+  signInBaseUrl.value = state.baseUrl || DEFAULT_BASE_URL;
+  signInModelId.value = state.modelId || DEFAULT_MODEL_ID;
+  signInApiKey.value = "";
+  signInMessage.classList.add("hidden");
+  signInOverlay.classList.remove("hidden");
+  document.body.classList.add("sign-in-open");
+  setTimeout(() => signInApiKey.focus(), 60);
+}
+
+function hideSignIn() {
+  signInOverlay.classList.add("hidden");
+  document.body.classList.remove("sign-in-open");
+}
+
+signInForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const baseUrl = signInBaseUrl.value.trim().replace(/\/+$/, "") || DEFAULT_BASE_URL;
+  const apiKey = signInApiKey.value.trim();
+  const modelId = signInModelId.value.trim() || DEFAULT_MODEL_ID;
+
+  if (!apiKey) {
+    signInMessage.textContent =
+      "❌ An Open WebUI API key is required. Follow the steps above to create one.";
+    signInMessage.classList.remove("hidden");
+    return;
+  }
+
+  signInTestBtn.disabled = true;
+  signInTestBtn.textContent = "Testing connection...";
+  signInMessage.textContent = "Testing connection...";
+  signInMessage.classList.remove("hidden");
+
+  const result = await runConnectionTest(baseUrl, apiKey);
+
+  signInTestBtn.disabled = false;
+  signInTestBtn.textContent = "Test Connection & Enter";
+
+  if (!result.ok) {
+    signInMessage.textContent = result.message + " Check the URL and key, then try again.";
+    signInMessage.classList.remove("hidden");
+    return;
+  }
+
+  // Success: persist exactly like Settings > Save, sync the settings panel,
+  // then unlock the page. This is the ONLY way the gate closes.
+  state.baseUrl = baseUrl;
+  state.apiKey = apiKey;
+  state.modelId = modelId;
+  localStorage.setItem("dnd_baseUrl", state.baseUrl);
+  localStorage.setItem("dnd_apiKey", state.apiKey);
+  localStorage.setItem("dnd_modelId", state.modelId);
+  baseUrlInput.value = state.baseUrl;
+  modelIdInput.value = state.modelId;
+  apiKeyInput.value = state.apiKey;
+  updateConnectionPill("ok", "Connected");
+  hydrateImages();
+  hideSignIn();
 });
 
 newAdventureBtn.addEventListener("click", () => {

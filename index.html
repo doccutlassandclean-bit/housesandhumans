@@ -114,6 +114,43 @@
   </main>
 </div>
 
+<div id="signInOverlay" class="sign-in-overlay hidden" role="dialog" aria-modal="true" aria-label="Sign in to Open WebUI">
+  <div class="sign-in-card">
+    <h1 class="sign-in-title">🗡️ Enter the Tavern</h1>
+    <p class="sign-in-sub">Sign in to your Open WebUI server to begin your adventure.</p>
+
+    <form id="signInForm">
+      <label class="sign-in-label">Open WebUI Base URL
+        <input type="text" id="signInBaseUrl" autocomplete="url" />
+      </label>
+
+      <label class="sign-in-label">Open WebUI API Key
+        <input type="password" id="signInApiKey" placeholder="sk-..." autocomplete="off" />
+      </label>
+
+      <div class="sign-in-help">
+        <strong>How to get your API key:</strong>
+        <ol>
+          <li>Open your Open WebUI site in a browser tab and sign in.</li>
+          <li>Click your <strong>profile name</strong> in the top-right corner.</li>
+          <li>Choose <strong>Settings</strong>, then the <strong>Account</strong> tab.</li>
+          <li>Under <strong>API Keys</strong>, click <strong>Create new secret key</strong> if you don't have one, then copy it.</li>
+          <li>Paste that key here. (If you don't see API Keys, an admin must enable them for your account.)</li>
+        </ol>
+      </div>
+
+      <label class="sign-in-label">Model Name
+        <input type="text" id="signInModelId" />
+      </label>
+
+      <p id="signInMessage" class="sign-in-message hidden"></p>
+
+      <button id="signInTestBtn" class="btn primary sign-in-btn" type="submit">Test Connection &amp; Enter</button>
+      <p class="sign-in-note">The tavern door stays shut until the connection succeeds.</p>
+    </form>
+  </div>
+</div>
+
 <div id="settingsModal" class="modal hidden">
   <div class="modal-content">
     <h2>⚙️ Settings</h2>
