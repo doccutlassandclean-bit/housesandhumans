@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>D&amp;D 5.5e — AI Dungeon Master</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=Uncial+Antiqua&display=swap"
+  rel="stylesheet"
+/>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app">
+
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-icon">🐉</span>
+      <div>
+        <h1>D&amp;D 5.5e</h1>
+        <p class="subtitle">AI Dungeon Master · powered by Open WebUI</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span id="connectionStatus" class="status-pill status-unknown">● Not connected</span>
+      <button id="voiceToggleBtn" class="btn ghost" title="Toggle Dungeon Master voice narration">🔇 Voice: Off</button>
+      <button id="galleryToggleBtn" class="btn ghost" title="Toggle the adventure image gallery">🖼️ Gallery</button>
+      <button id="newAdventureBtn" class="btn ghost" title="Start a new adventure">🔄 New Adventure</button>
+      <button id="settingsBtn" class="btn ghost" title="Settings">⚙️ Settings</button>
+    </div>
+  </header>
+
+  <main class="layout">
+
+    <aside class="sidebar">
+      <div class="panel">
+        <h2>📜 Character Sheet</h2>
+        <form id="characterForm" class="character-form">
+          <label>Name
+            <input type="text" id="charName" placeholder="Elandra Duskwhisper" />
+          </label>
+          <label>Race
+            <input type="text" id="charRace" placeholder="Half-Elf" />
+          </label>
+
+          <div class="classes-block">
+            <div class="classes-header">
+              <span>Class(es)</span>
+              <button type="button" id="addClassBtn" class="btn ghost small">+ Add Class</button>
+            </div>
+            <div id="classList" class="class-list"></div>
+            <p class="hint">Multiclassed characters supported — up to 3 classes.</p>
+          </div>
+
+          <div class="grid-2">
+            <label>Total Level
+              <input type="text" id="charLevel" readonly />
+            </label>
+            <label>HP
+              <input type="text" id="charHP" placeholder="10 / 10" />
+            </label>
+          </div>
+          <label>Backstory &amp; Notes
+            <textarea id="charNotes" rows="4" placeholder="A brief background, personality, goals..."></textarea>
+          </label>
+          <button type="submit" class="btn primary full">Save Character</button>
+          <p id="charSavedHint" class="hint hidden">✅ Saved — the DM will remember this.</p>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h2>🎲 Dice Tray</h2>
+        <div class="dice-buttons">
+          <button class="die" data-die="4">d4</button>
+          <button class="die" data-die="6">d6</button>
+          <button class="die" data-die="8">d8</button>
+          <button class="die" data-die="10">d10</button>
+          <button class="die" data-die="12">d12</button>
+          <button class="die" data-die="20">d20</button>
+          <button class="die" data-die="100">d100</button>
+        </div>
+        <div id="diceResult" class="dice-result">Roll for it!</div>
+      </div>
+    </aside>
+
+    <section class="chat-panel">
+      <div id="chatLog" class="chat-log">
+        <div class="scene-message">
+          🕯️ The candlelight flickers across an old tavern table. Your Dungeon Master awaits...
+          <br />Open <strong>⚙️ Settings</strong> to add your Open WebUI API key, then say hello to begin your adventure.
+        </div>
+      </div>
+      <div id="typingIndicator" class="typing-indicator hidden">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        The Dungeon Master is weaving the tale...
+      </div>
+      <form id="chatForm" class="chat-input-form">
+        <textarea id="messageInput" placeholder="What do you do?" rows="2" required></textarea>
+        <button type="submit" class="btn primary send-btn">Send ➤</button>
+      </form>
+    </section>
+
+    <aside id="gallerySidebar" class="gallery-sidebar" aria-label="Adventure image gallery">
+      <div class="gallery-header">
+        <h2>🖼️ Adventure Gallery</h2>
+        <button id="galleryCloseBtn" class="gallery-close" type="button" title="Hide gallery">✕</button>
+      </div>
+      <div id="galleryGrid" class="gallery-grid"></div>
+      <p id="galleryEmpty" class="gallery-empty">Images created during this adventure will gather here.</p>
+    </aside>
+
+  </main>
+</div>
+
+<div id="settingsModal" class="modal hidden">
+  <div class="modal-content">
+    <h2>⚙️ Settings</h2>
+
+    <label>Open WebUI Base URL
+      <input type="text" id="baseUrlInput" placeholder="http://localhost:3000" />
+    </label>
+
+    <label>Model ID
+      <input type="text" id="modelIdInput" placeholder="dd-5e" />
+    </label>
+
+    <label>API Key
+      <input type="password" id="apiKeyInput" placeholder="sk-..." autocomplete="off" />
+    </label>
+    <p class="hint">Get your key from Open WebUI: Settings → Account → API Keys.</p>
+
+    <p class="hint">
+      🎭 The system prompt saved on your model in Open WebUI is applied automatically — no prompt needs to be entered here.
+      The character sheet from the left panel is included with every request so the Dungeon Master regularly keeps it in mind.
+    </p>
+
+    <div class="settings-divider"></div>
+    <h3 class="settings-subheading">🔊 Dungeon Master Voice</h3>
+
+    <label class="checkbox-label">
+      <input type="checkbox" id="voiceEnabledInput" />
+      Read the Dungeon Master's replies aloud
+    </label>
+
+    <label>Narrator Voice
+      <select id="voiceSelectInput"></select>
+    </label>
+
+    <div class="grid-2">
+      <label>Speed (<span id="voiceRateValue">1.0</span>x)
+        <input type="range" id="voiceRateInput" min="0.5" max="2" step="0.1" value="1" />
+      </label>
+      <label>Pitch (<span id="voicePitchValue">1.0</span>)
+        <input type="range" id="voicePitchInput" min="0" max="2" step="0.1" value="1" />
+      </label>
+    </div>
+
+    <button id="testVoiceBtn" class="btn ghost">🎙️ Test Voice</button>
+
+    <div class="modal-actions">
+      <button id="testConnectionBtn" class="btn ghost">Test Connection</button>
+      <button id="saveSettingsBtn" class="btn primary">Save</button>
+      <button id="closeSettingsBtn" class="btn ghost">Close</button>
+    </div>
+    <p id="settingsMessage" class="hint hidden"></p>
+  </div>
+</div>
+
+<div id="imageLightbox" class="image-lightbox hidden" role="dialog" aria-modal="true" aria-label="Image viewer">
+  <button id="imageLightboxClose" class="image-lightbox-close" type="button" title="Close (Esc)">✕</button>
+  <img id="imageLightboxImg" alt="Image preview" />
+  <a id="imageLightboxOpen" class="image-lightbox-open" href="#" target="_blank" rel="noopener noreferrer">Open original ↗</a>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
