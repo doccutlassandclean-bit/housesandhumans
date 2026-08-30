@@ -38,7 +38,7 @@ html, body {
   align-items: center;
   justify-content: space-between;
   padding: 14px 24px;
-  background: linear-gradient(180deg, #0f1f14, #060c07);
+  background: linear-gradient(180deg, #000000, #060c07);
   border-bottom: 2px solid var(--gold);
   box-shadow: var(--shadow);
   flex-wrap: wrap;
