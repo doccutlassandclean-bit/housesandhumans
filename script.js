@@ -564,7 +564,7 @@ document.querySelectorAll(".die").forEach((btn) => {
 });
 
 // ---------- Character sheet ----------
-const CLASS_OPTIONS = ["Barbarian", "Bard", "Cleric", "Druid", "Fighter", "Monk", "Paladin", "Ranger", "Rogue", "Sorcerer", "Warlock", "Wizard"];
+const CLASS_OPTIONS = ["Artificer","Barbarian", "Bard", "Cleric", "Druid", "Fighter", "Monk", "Paladin", "Pugilist", "Ranger", "Rogue", "Sorcerer", "Warlock", "Wizard"];
 let charData = { name: "", race: "", classes: [{ name: "", level: 1 }], hp: "", notes: "" };
 
 function updateCharLevel() {
