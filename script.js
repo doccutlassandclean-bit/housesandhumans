@@ -10,11 +10,37 @@ const DEFAULT_BASE_URL = "https://cutlass-device.hamster-mohs.ts.net";
 const DEBUG_STREAM =
   new URLSearchParams(location.search).get("debug") === "1";
 
+// Safe load of the message history. Malformed JSON, a non-array value, or
+// entries that don't match the message shape are cleared and ignored so they
+// can never break boot or later code paths.
+function safeLoadMessages() {
+  const raw = localStorage.getItem("dnd_messages");
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    localStorage.removeItem("dnd_messages");
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    localStorage.removeItem("dnd_messages");
+    return [];
+  }
+  return parsed.filter(
+    (m) =>
+      m &&
+      typeof m === "object" &&
+      (m.role === "user" || m.role === "assistant") &&
+      typeof m.content === "string"
+  );
+}
+
 const state = {
   baseUrl: localStorage.getItem("dnd_baseUrl") || DEFAULT_BASE_URL,
   modelId: localStorage.getItem("dnd_modelId") || DEFAULT_MODEL_ID,
   apiKey: localStorage.getItem("dnd_apiKey") || "",
-  messages: JSON.parse(localStorage.getItem("dnd_messages") || "[]"),
+  messages: safeLoadMessages(),
   streaming: false,
 };
 
@@ -683,13 +709,37 @@ characterForm.addEventListener("submit", (e) => {
   setTimeout(() => charSavedHint.classList.add("hidden"), 2500);
 });
 
-function restoreCharacter() {
-  try {
-    const saved = JSON.parse(localStorage.getItem("dnd_char") || "null");
-    if (saved && typeof saved === "object") charData = Object.assign(charData, saved);
-  } catch {
-    /* fresh start */
+// Load saved character data, migrating once from the legacy "dnd_character"
+// key to "dnd_char". Never overwrites an existing valid dnd_char value;
+// malformed data fails safely (returns null).
+function loadCharacterData() {
+  const current = localStorage.getItem("dnd_char");
+  if (current !== null) {
+    try {
+      const parsed = JSON.parse(current);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      /* corrupt current value: treat as no character */
+    }
+    return null;
   }
+  const legacy = localStorage.getItem("dnd_character");
+  if (legacy === null) return null;
+  try {
+    const parsed = JSON.parse(legacy);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      localStorage.setItem("dnd_char", JSON.stringify(parsed)); // migrate once
+      return parsed;
+    }
+  } catch {
+    /* malformed legacy: fail safe */
+  }
+  return null;
+}
+
+function restoreCharacter() {
+  const saved = loadCharacterData();
+  if (saved) charData = Object.assign(charData, saved);
   charName.value = charData.name || "";
   charRace.value = charData.race || "";
   charHP.value = charData.hp || "";
