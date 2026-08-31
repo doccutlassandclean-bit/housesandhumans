@@ -336,7 +336,9 @@ function formatMessageText(text) {
   html = html.replace(/\u0000IMG(\d+)\u0000/g, (m, i) => {
     const img = images[Number(i)];
     if (!img) return "";
-    const src = escapeHtml(resolveImageUrl(img.url));
+    const resolved = resolveImageUrl(img.url);
+    if (!isSafeImageUrl(resolved)) return ""; // fail closed: no executable URLs
+    const src = escapeHtml(resolved);
     const alt = escapeHtml(img.alt || "Image");
     return `<a href="${src}" target="_blank" rel="noopener noreferrer" class="chat-image-link"><img src="${src}" alt="${alt}" class="chat-image" loading="lazy" referrerpolicy="no-referrer" /></a>`;
   });
@@ -351,8 +353,37 @@ function resolveImageUrl(url) {
   return url;
 }
 
+// ---------- URL safety ----------
+// Single shared same-origin guard: the Open WebUI API key may only ever be
+// attached to requests whose URL resolves to the configured Open WebUI
+// origin itself (protocol + hostname + port). String-prefix or substring
+// comparisons are NOT used: "configured-host.evil.example.com" is foreign.
+function isSameOriginAsBase(url) {
+  try {
+    const base = new URL(state.baseUrl);
+    const target = new URL(resolveImageUrl(url));
+    return (
+      target.protocol === base.protocol &&
+      target.hostname === base.hostname &&
+      target.port === base.port
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Display/render allowlist: only schemes this app genuinely uses may be
+// placed into <img>/<a> attributes or opened from the lightbox. Everything
+// else (javascript:, vbscript:, data:text/html, file:, ...) is rejected.
+const SAFE_IMAGE_SCHEME_RE = /^(https?:|blob:|data:image\/)/i;
+function isSafeImageUrl(url) {
+  if (!url) return false;
+  return SAFE_IMAGE_SCHEME_RE.test(String(url).trim());
+}
+
 function createImageAnchor(url, alt) {
   const src = resolveImageUrl(url);
+  if (!isSafeImageUrl(src)) return null;
   const anchor = document.createElement("a");
   anchor.className = "chat-image-link";
   anchor.href = src;
@@ -369,9 +400,13 @@ function createImageAnchor(url, alt) {
 }
 
 async function fetchImageAsBlob(url) {
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${state.apiKey}` },
-  });
+  // The API key is only ever attached for requests to the configured
+  // Open WebUI origin itself — never to foreign hosts.
+  const headers =
+    state.apiKey && isSameOriginAsBase(url)
+      ? { Authorization: `Bearer ${state.apiKey}` }
+      : {};
+  const res = await fetch(url, { headers });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return URL.createObjectURL(await res.blob());
 }
@@ -383,9 +418,7 @@ async function hydrateImages() {
     const src = imgEl.getAttribute("src") || "";
     if (!src || src.startsWith("blob:") || src.startsWith("data:")) continue;
     const absolute = resolveImageUrl(src);
-    const needsAuth =
-      absolute.startsWith(state.baseUrl) || absolute.includes("/api/v1/files/");
-    if (!needsAuth) continue;
+    if (!isSameOriginAsBase(absolute)) continue;
     try {
       const objectUrl = await fetchImageAsBlob(absolute);
       imgEl.onerror = () => URL.revokeObjectURL(objectUrl);
@@ -426,6 +459,7 @@ function persistMessages() {
 
 // ---------- Lightbox (view existing images in-page; never downloads) ----------
 function openImageLightbox(src, alt) {
+  if (!isSafeImageUrl(src)) return; // never display executable/unsafe URLs
   imageLightboxImg.src = src;
   imageLightboxImg.alt = alt || "Image preview";
   imageLightboxOpen.dataset.src = src;
@@ -454,7 +488,11 @@ imageLightboxClose.addEventListener("click", closeImageLightbox);
 imageLightboxOpen.addEventListener("click", (e) => {
   e.preventDefault();
   const src = imageLightboxOpen.dataset.src;
-  if (src) window.open(src, "_blank", "noopener");
+  if (!src) return;
+  const resolved = resolveImageUrl(src);
+  // Only safe display schemes may ever be opened in a new tab.
+  if (!isSafeImageUrl(resolved)) return;
+  window.open(resolved, "_blank", "noopener");
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !imageLightbox.classList.contains("hidden")) {
@@ -516,7 +554,8 @@ function appendMessageBubble(role, content) {
         mdImgs.find((mi) => mi.url === m[1].trim()) || { url: m[1], alt: "" };
       const wrap = document.createElement("div");
       wrap.className = "message-images inline";
-      wrap.appendChild(createImageAnchor(found.url, found.alt || "Image"));
+      const anchor = createImageAnchor(found.url, found.alt || "Image");
+      if (anchor) wrap.appendChild(anchor);
       body.appendChild(wrap);
       rest = rest.slice(m.index + m[0].length);
     }
