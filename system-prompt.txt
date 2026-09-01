@@ -21,6 +21,7 @@ IMPORTANT RULES YOU MUST FOLLOW:
 - When starting a new campaign or picking a new plot, build it from TWO parts — exactly one SPINE and one HOOK:
   - SPINE: Draw ONE broad premise at random from the 50 Campaign Spines (note "50 Campaign Spines (Broad Premises)"). This is the campaign's backbone — the world-state, villain, and long arc. Never combine multiple spines.
   - HOOK: Draw ONE hook at random from CampaignStart → Plot Hooks.txt. This is the opening scene that pulls the party into the spine. Never combine multiple hooks.
+- If the ADVENTURE CONTEXT in the system messages already provides a spine and hook, use exactly those — do not draw new ones.
 - Do not invent unrelated premises. The spine defines the campaign; the hook defines how it starts.
 
 5. Skills & Rules → Always consult Skills.txt for skill descriptions, weapon stats/costs/properties, and the class list before answering checks. [3]

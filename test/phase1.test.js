@@ -41,7 +41,6 @@ function startMockOwu() {
       return res.end(JSON.stringify({ data: [{ id: "dd-5e", name: "D&D 5e" }] }));
     }
     if (url.pathname === "/api/chat/completions") {
-      state.chatRequests += 1;
       let raw = "";
       req.on("data", (c) => (raw += c));
       req.on("end", async () => {
@@ -51,6 +50,35 @@ function startMockOwu() {
         } catch {
           /* malformed body: treat as empty */
         }
+        // Phase 2A: every chat turn may first trigger a non-streamed
+        // premise-generation call. Answer it with a fixed valid premise and
+        // leave lastChatBody for the chat call only.
+        const isPremiseCall =
+          body.stream === false &&
+          Array.isArray(body.messages) &&
+          body.messages.some(
+            (m) =>
+              m.role === "system" &&
+              typeof m.content === "string" &&
+              m.content.includes("premise generator")
+          );
+        if (isPremiseCall) {
+          res.writeHead(200, { "content-type": "application/json" });
+          return res.end(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content:
+                      '{"spine":"p1 spine","hook":"p1 hook"}',
+                  },
+                  finish_reason: "stop",
+                },
+              ],
+            })
+          );
+        }
+        state.chatRequests += 1;
         state.lastChatBody = body;
         const trigger = (name) =>
           (body.messages || []).some(
@@ -374,7 +402,9 @@ test("chat proxy streams SSE and injects server-side system context", async () =
   const echoLine = text.split("\n\n").find((l) => l.includes("mock_echo"));
   assert.ok(echoLine, "mock echo line present");
   const echo = JSON.parse(echoLine.replace(/^data: /, "")).mock_echo;
-  assert.equal(echo.messages.length, 3);
+  // Phase 2A: system context is [DM prompt, ADVENTURE CONTEXT (premise),
+  // character snapshot] followed by the client's user/assistant history.
+  assert.equal(echo.messages.length, 4);
   assert.equal(echo.messages[0].role, "system");
   assert.ok(
     echo.messages[0].content.includes("TEST DM PROMPT VERSION 1"),
@@ -382,11 +412,17 @@ test("chat proxy streams SSE and injects server-side system context", async () =
   );
   assert.equal(echo.messages[1].role, "system");
   assert.ok(
-    echo.messages[1].content.includes("- Name: Elara"),
+    echo.messages[1].content.includes("- Story spine: p1 spine") &&
+      echo.messages[1].content.includes("- Plot hook: p1 hook"),
+    "stored premise is injected as adventure context"
+  );
+  assert.equal(echo.messages[2].role, "system");
+  assert.ok(
+    echo.messages[2].content.includes("- Name: Elara"),
     "character snapshot is injected as system context"
   );
-  assert.equal(echo.messages[2].role, "user");
-  assert.equal(echo.messages[2].content, "Hello, innkeeper.");
+  assert.equal(echo.messages[3].role, "user");
+  assert.equal(echo.messages[3].content, "Hello, innkeeper.");
   assert.equal(mockState.lastChatBody.model, "dd-5e");
   assert.equal(mockState.lastChatBody.stream, true);
 });

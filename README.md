@@ -36,6 +36,21 @@ built. Missing/invalid headers fall back to `DEV_USER_ID` (default `dev`).
 until real authentication is implemented. `X-User-Id` is never consulted in
 production. The static site is still served.
 
+## Premises (Phase 2A)
+
+Each adventure gets **one story spine and one opening plot hook**, generated
+once — on the first chat message — from the adventure's character snapshot and
+the player's first message, then stored on the adventure row and reused for
+the life of the adventure (never silently regenerated). If generation fails,
+the chat turn fails closed with a retryable error and nothing is persisted.
+
+The premise call reuses the exact same provider request shape as normal DM
+chat (same endpoint, same configured model, same prompt-text references to the
+"50 Campaign Spines" note and `CampaignStart → Plot Hooks.txt`), so it has the
+same Open WebUI knowledge access the DM model already has. No provider-specific
+knowledge metadata is used; knowledge attachment is the Open WebUI model
+configuration's responsibility, as it already is for ordinary chat.
+
 ## Tests
 
 `npm test` runs deterministic tests against a local mock Open WebUI server.

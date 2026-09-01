@@ -26,6 +26,8 @@ const MAX_CHAT_MESSAGES = 200;
 const MAX_MESSAGE_CHARS = 20000;
 const MAX_TITLE_CHARS = 120;
 const PROVIDER_TIMEOUT_MS = 5000;
+const PREMISE_TIMEOUT_MS = 45000;
+const PREMISE_MAX_CHARS = 300;
 
 function createApp(options) {
   const opts = Object.assign(
@@ -76,6 +78,10 @@ function createApp(options) {
     updateAdventure: db.prepare(
       "UPDATE adventures SET title = @title, character = @character, updated_at = @now " +
         "WHERE id = @id AND user_id = @user_id"
+    ),
+    setPremise: db.prepare(
+      "UPDATE adventures SET spine = @spine, hook = @hook, updated_at = @now " +
+        "WHERE id = @id AND user_id = @user_id AND (spine IS NULL OR hook IS NULL)"
     ),
   };
 
@@ -159,6 +165,170 @@ function createApp(options) {
       out.push({ role: "system", content: lines.join("\n") });
     }
     return out;
+  }
+
+  // ---------- Premise generation (one spine + one hook, once per adventure) ----------
+  // The premise call reuses the exact same provider request shape as normal
+  // DM chat: the same endpoint, the same configured model, and the same
+  // prompt-text references to the curated knowledge resources (the "50
+  // Campaign Spines" note and CampaignStart / Plot Hooks.txt). No
+  // provider-specific metadata (collection ids, files params) is added:
+  // knowledge attachment is the Open WebUI model configuration's
+  // responsibility, exactly as it already is for ordinary chat turns, so
+  // premise generation can never have less knowledge access than the DM
+  // model has today.
+  const premiseJobs = new Map(); // adventureId -> Promise<row>
+
+  const PREMISE_SYSTEM_PROMPT = [
+    "You are the premise generator for Houses & Humans, a lightweight D&D 5.5e adventure app.",
+    "Output exactly one JSON object as instructed, and nothing else.",
+  ].join("\n");
+
+  // Inputs are narrowly scoped on purpose: only the adventure's character
+  // snapshot and the player's current (first) message. No prior chat
+  // history is sent to the premise generator; the current message may
+  // tailor the hook so the opening stays coherent with how the player
+  // chose to begin.
+  function buildPremiseUserPrompt(character, currentMessage) {
+    const snapshot = character || {};
+    const classes = (Array.isArray(snapshot.classes) ? snapshot.classes : [])
+      .filter((k) => k && k.name)
+      .map((k) => `${k.name} ${k.level}`)
+      .join(" / ");
+    const charLines = [
+      "PLAYER CHARACTER:",
+      `- Name: ${snapshot.name || "(not set)"}`,
+      `- Race: ${snapshot.race || "(not set)"}`,
+      `- Class/Level: ${classes || "(not set)"}`,
+      `- HP: ${snapshot.hp || "(player-tracked)"}`,
+    ];
+    if (snapshot.notes) charLines.push(`- Visual & Backstory: ${snapshot.notes}`);
+    const current =
+      String(currentMessage || "").trim().slice(0, 2000) ||
+      "(the player just started the adventure)";
+    return [
+      "Choose ONE story spine and ONE opening plot hook for a new, short D&D 5.5e adventure.",
+      "",
+      "Follow these rules:",
+      "- Exactly ONE SPINE and ONE HOOK. Never combine multiple.",
+      '- SPINE: draw ONE broad premise from the "50 Campaign Spines" knowledge (the note titled "50 Campaign Spines (Broad Premises)"). This is the adventure\'s backbone: the world-state, the central tension, and a loose direction. Do NOT plan scenes, encounters, NPC rosters, quest chains, locations, or an ending.',
+      "- HOOK: draw ONE opening situation from the CampaignStart knowledge (CampaignStart → Plot Hooks.txt). It must pull the player's character into the story immediately at the start of play.",
+      "- Tailor both to the player's character so the adventure explores who that character is.",
+      "- The player's first message is below; let it shape the hook so the opening stays coherent with how the player chose to begin.",
+      "",
+      charLines.join("\n"),
+      "",
+      "CURRENT PLAYER MESSAGE (first message of the adventure):",
+      current,
+      "",
+      "Reply with one JSON object and nothing else (no markdown fences, no commentary):",
+      '{"spine":"<1-2 sentences: the adventure\'s central tension and loose arc>","hook":"<1-2 sentences: the immediate opening situation that pulls the character in>"}',
+      "",
+      "Constraints:",
+      "- spine and hook are plain English, present tense, each under 300 characters.",
+      "- Do not pre-generate scenes, encounters, NPCs, quests, or endings.",
+    ].join("\n");
+  }
+
+  // Lenient, fail-safe parsing: strip a markdown fence if present, then
+  // JSON.parse, then a first-{/last-} substring fallback. Returns
+  // {spine, hook} or null. Nothing is persisted unless both values pass.
+  function parsePremise(text) {
+    if (typeof text !== "string") return null;
+    let t = text.trim();
+    const fenced = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+    if (fenced) t = fenced[1].trim();
+    let obj = null;
+    try {
+      obj = JSON.parse(t);
+    } catch {
+      const start = t.indexOf("{");
+      const end = t.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try {
+          obj = JSON.parse(t.slice(start, end + 1));
+        } catch {
+          return null;
+        }
+      } else {
+        return null;
+      }
+    }
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const norm = (v) =>
+      typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "";
+    const spine = norm(obj.spine);
+    const hook = norm(obj.hook);
+    if (!spine || !hook) return null;
+    if (spine.length > PREMISE_MAX_CHARS || hook.length > PREMISE_MAX_CHARS) {
+      return null;
+    }
+    if (spine === hook) return null; // copy-paste artifact
+    return { spine, hook };
+  }
+
+  // One non-streamed provider completion. Client aborts and timeouts
+  // propagate as-is (no retry); invalid output is retried once.
+  async function generatePremise(character, currentMessage, signal) {
+    const timeout = AbortSignal.timeout(PREMISE_TIMEOUT_MS);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const attempt = async () => {
+      const res = await fetch(OWU_BASE_URL + "/api/chat/completions", {
+        method: "POST",
+        headers: providerHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          model: DEFAULT_MODEL_ID,
+          messages: [
+            { role: "system", content: PREMISE_SYSTEM_PROMPT },
+            { role: "user", content: buildPremiseUserPrompt(character, currentMessage) },
+          ],
+          stream: false,
+        }),
+        signal: combined,
+      });
+      if (!res.ok) {
+        throw new Error("premise provider HTTP " + res.status);
+      }
+      const data = await res.json().catch(() => null);
+      const content =
+        data && data.choices && data.choices[0] && data.choices[0].message
+          ? data.choices[0].message.content
+          : "";
+      return parsePremise(content);
+    };
+
+    const first = await attempt();
+    if (first) return first;
+    const second = await attempt(); // one retry for invalid output only
+    if (second) return second;
+    throw new Error("premise generation produced invalid output twice");
+  }
+
+  // Idempotent + concurrency-safe: an existing premise is returned as-is
+  // (never regenerated); concurrent first turns share one in-flight
+  // generation; the guarded UPDATE writes both columns atomically and is a
+  // no-op if another writer won the race.
+  function ensurePremise(row, currentMessage, signal) {
+    if (row.spine && row.hook) return Promise.resolve(row);
+    const key = row.id;
+    const existing = premiseJobs.get(key);
+    if (existing) return existing;
+    const character = rowToAdventure(row).character;
+    const job = generatePremise(character, currentMessage, signal)
+      .then((premise) => {
+        const now = new Date().toISOString();
+        stmts.setPremise.run({
+          spine: premise.spine,
+          hook: premise.hook,
+          now,
+          id: row.id,
+          user_id: row.user_id,
+        });
+        return stmts.getAdventure.get(row.id, row.user_id);
+      })
+      .finally(() => premiseJobs.delete(key));
+    premiseJobs.set(key, job);
+    return job;
   }
 
   // ---------- App ----------
@@ -403,16 +573,38 @@ function createApp(options) {
         });
       }
 
-      const composed = buildSystemMessages(row).concat(messages);
-
       // Client disconnects (e.g. New Adventure cancelling a turn) abort the
-      // upstream request so provider tokens stop being spent.
+      // premise generation and the upstream chat request alike, so provider
+      // tokens stop being spent.
       const ac = new AbortController();
       const onClientGone = () => {
         if (!res.writableEnded) ac.abort();
       };
       req.on("aborted", onClientGone);
       res.on("close", onClientGone);
+
+      // One spine + one hook, chosen once per adventure. A stored premise
+      // is reused as-is (never regenerated); a missing one is generated
+      // from the character snapshot and this turn's message before any
+      // chat context is composed or streamed.
+      const lastUserMessage = (() => {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === "user") return messages[i].content;
+        }
+        return "";
+      })();
+
+      let premiseRow;
+      try {
+        premiseRow = await ensurePremise(row, lastUserMessage, ac.signal);
+      } catch (err) {
+        if (err && err.name === "AbortError") return res.end(); // client went away
+        return res.status(502).json({
+          error: { message: "The adventure could not be prepared. Please try again." },
+        });
+      }
+
+      const composed = buildSystemMessages(premiseRow || row).concat(messages);
 
       let upstream;
       try {

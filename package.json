@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
     "dev": "node --watch --env-file-if-exists=.env server.js",
-    "test": "node test/phase1.test.js"
+    "test": "node test/phase1.test.js && node test/premise.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",
