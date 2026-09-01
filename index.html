@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta
   http-equiv="Content-Security-Policy"
-  content="default-src 'none'; script-src 'self' file:; style-src 'self' file: https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' file: https: http: data: blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'"
+  content="default-src 'none'; script-src 'self' file:; style-src 'self' file: https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' file: https: http: data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
 />
 <title>D&amp;D 5.5e — AI Dungeon Master</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -30,7 +30,6 @@
     <div class="header-actions">
       <span id="connectionStatus" class="status-pill status-unknown">● Not connected</span>
       <button id="newAdventureBtn" class="btn ghost" title="Start a new adventure">🔄 New Adventure</button>
-      <button id="settingsBtn" class="btn ghost" title="Settings">⚙️ Settings</button>
     </div>
   </header>
 
@@ -91,7 +90,7 @@
       <div id="chatLog" class="chat-log">
         <div class="scene-message">
           🕯️ The candlelight flickers across an old tavern table. Your Dungeon Master awaits...
-          <br />Open <strong>⚙️ Settings</strong> to add your Open WebUI API key, then say hello to begin your adventure.
+          <br />Say hello to begin your adventure.
         </div>
       </div>
       <div id="typingIndicator" class="typing-indicator hidden">
@@ -105,74 +104,6 @@
     </section>
 
   </main>
-</div>
-
-<div id="signInOverlay" class="sign-in-overlay hidden" role="dialog" aria-modal="true" aria-label="Sign in to Open WebUI">
-  <div class="sign-in-card">
-    <h1 class="sign-in-title">🗡️ Enter the Tavern</h1>
-    <p class="sign-in-sub">Sign in to your Open WebUI server to begin your adventure.</p>
-
-    <form id="signInForm">
-      <label class="sign-in-label">Open WebUI Base URL
-        <input type="text" id="signInBaseUrl" autocomplete="url" />
-      </label>
-
-      <label class="sign-in-label">Open WebUI API Key
-        <input type="password" id="signInApiKey" placeholder="sk-..." autocomplete="off" />
-      </label>
-
-      <div class="sign-in-help">
-        <strong>How to get your API key:</strong>
-        <ol>
-          <li>Open your Open WebUI site in a browser tab and sign in.</li>
-          <li>Click your <strong>profile name</strong> in the top-right corner.</li>
-          <li>Choose <strong>Settings</strong>, then the <strong>Account</strong> tab.</li>
-          <li>Under <strong>API Keys</strong>, click <strong>Create new secret key</strong> if you don't have one, then copy it.</li>
-          <li>Paste that key here. (If you don't see API Keys, an admin must enable them for your account.)</li>
-        </ol>
-      </div>
-
-      <label class="sign-in-label">Model Name
-        <input type="text" id="signInModelId" />
-      </label>
-
-      <p id="signInMessage" class="sign-in-message hidden"></p>
-
-      <button id="signInTestBtn" class="btn primary sign-in-btn" type="submit">Test Connection &amp; Enter</button>
-      <p class="sign-in-note">The tavern door stays shut until the connection succeeds.</p>
-    </form>
-  </div>
-</div>
-
-<div id="settingsModal" class="modal hidden">
-  <div class="modal-content">
-    <h2>⚙️ Settings</h2>
-
-    <label>Open WebUI Base URL
-      <input type="text" id="baseUrlInput" placeholder="https://cutlass-device.hamster-mohs.ts.net" />
-    </label>
-
-    <label>Model ID
-      <input type="text" id="modelIdInput" placeholder="dd-5e" />
-    </label>
-
-    <label>API Key
-      <input type="password" id="apiKeyInput" placeholder="sk-..." autocomplete="off" />
-    </label>
-    <p class="hint">Get your key from Open WebUI: Settings → Account → API Keys.</p>
-
-    <p class="hint">
-      🎭 The system prompt saved on your model in Open WebUI is applied automatically — no prompt needs to be entered here.
-      The character sheet from the left panel is included with every request so the Dungeon Master regularly keeps it in mind.
-    </p>
-
-    <div class="modal-actions">
-      <button id="testConnectionBtn" class="btn ghost">Test Connection</button>
-      <button id="saveSettingsBtn" class="btn primary">Save</button>
-      <button id="closeSettingsBtn" class="btn ghost">Close</button>
-    </div>
-    <p id="settingsMessage" class="hint hidden"></p>
-  </div>
 </div>
 
 <div id="imageLightbox" class="image-lightbox hidden" role="dialog" aria-modal="true" aria-label="Image viewer">

@@ -1,30 +1,30 @@
 /* ============================================================
-   D&D 5e — AI Dungeon Master chat client for Open WebUI
+   D&D 5.5e — AI Dungeon Master (Houses & Humans, Phase 1)
+   Chat client for the Houses & Humans backend, which proxies
+   Open WebUI server-side. The browser holds no API keys.
    Text-only DM: image generation, the gallery sidebar, and voice
    settings have been removed. Markdown images already present in
    saved history still render inline and open in the lightbox.
    ============================================================ */
 
-const DEFAULT_MODEL_ID = "dd-5e";
-const DEFAULT_BASE_URL = "https://cutlass-device.hamster-mohs.ts.net";
 const DEBUG_STREAM =
   new URLSearchParams(location.search).get("debug") === "1";
 
 // Safe load of the message history. Malformed JSON, a non-array value, or
 // entries that don't match the message shape are cleared and ignored so they
 // can never break boot or later code paths.
-function safeLoadMessages() {
-  const raw = localStorage.getItem("dnd_messages");
+function safeLoadMessages(key) {
+  const raw = localStorage.getItem(key);
   if (!raw) return [];
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    localStorage.removeItem("dnd_messages");
+    localStorage.removeItem(key);
     return [];
   }
   if (!Array.isArray(parsed)) {
-    localStorage.removeItem("dnd_messages");
+    localStorage.removeItem(key);
     return [];
   }
   return parsed.filter(
@@ -36,15 +36,41 @@ function safeLoadMessages() {
   );
 }
 
+// Development-only identity: a stable, locally generated id sent as
+// X-User-Id. It is spoofable by design and exists only until real
+// authentication is implemented (the server rejects it in production).
+function makeUserId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  let s = "";
+  for (let i = 0; i < 32; i++) s += Math.floor(Math.random() * 16).toString(16);
+  return s;
+}
+
+function getOrCreateUserId() {
+  const USER_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+  const existing = localStorage.getItem("hh_user_id");
+  if (existing && USER_ID_RE.test(existing)) return existing;
+  const id = makeUserId();
+  localStorage.setItem("hh_user_id", id);
+  return id;
+}
+
 const state = {
-  baseUrl: localStorage.getItem("dnd_baseUrl") || DEFAULT_BASE_URL,
-  modelId: localStorage.getItem("dnd_modelId") || DEFAULT_MODEL_ID,
-  apiKey: localStorage.getItem("dnd_apiKey") || "",
-  messages: safeLoadMessages(),
+  userId: getOrCreateUserId(),
+  activeAdventure: null, // adventure object from the backend (id/title/spine/hook/character)
+  messages: [],
   streaming: false,
   activeChatController: null, // AbortController for the in-flight chat request
   turnSeq: 0, // bumped by New Adventure to invalidate stale turns
 };
+
+function messagesKey() {
+  return state.activeAdventure
+    ? "dnd_messages:" + state.activeAdventure.id
+    : "dnd_messages"; // pre-adventure edge case only
+}
 
 // ---------- DOM refs ----------
 const chatLog = document.getElementById("chatLog");
@@ -52,25 +78,6 @@ const chatForm = document.getElementById("chatForm");
 const messageInput = document.getElementById("messageInput");
 const typingIndicator = document.getElementById("typingIndicator");
 const connectionStatus = document.getElementById("connectionStatus");
-
-const settingsModal = document.getElementById("settingsModal");
-const settingsBtn = document.getElementById("settingsBtn");
-const closeSettingsBtn = document.getElementById("closeSettingsBtn");
-const saveSettingsBtn = document.getElementById("saveSettingsBtn");
-const testConnectionBtn = document.getElementById("testConnectionBtn");
-const settingsMessage = document.getElementById("settingsMessage");
-
-const baseUrlInput = document.getElementById("baseUrlInput");
-const modelIdInput = document.getElementById("modelIdInput");
-const apiKeyInput = document.getElementById("apiKeyInput");
-
-const signInOverlay = document.getElementById("signInOverlay");
-const signInForm = document.getElementById("signInForm");
-const signInBaseUrl = document.getElementById("signInBaseUrl");
-const signInApiKey = document.getElementById("signInApiKey");
-const signInModelId = document.getElementById("signInModelId");
-const signInMessage = document.getElementById("signInMessage");
-const signInTestBtn = document.getElementById("signInTestBtn");
 
 const newAdventureBtn = document.getElementById("newAdventureBtn");
 
@@ -123,203 +130,9 @@ function speak(text) {
   window.speechSynthesis.speak(u);
 }
 
-// ---------- DM system prompt (verbatim; the image-generation rule and
-// style-guide sections were removed together with all image features) ----------
-const DM_SYSTEM_PROMPT = [
-`###DM Traits
-
-You are a fair and creative Dungeon Master for Dungeons & Dragons 5th edition.
-
-IMPORTANT RULES YOU MUST FOLLOW:
-1. The player manages their own character stats (HP, spells, inventory). You will NEVER calculate their health. Instead, describe consequences narratively.
-
-1.5.When using a narrative phrasing, metaphor, figure of speech. Make sure that you do not repeat that line again for several prompts. Avoid being repetitive. Find new ways to describe the same thing.
-
-2. The player will tell you their character's: Name, Race, Level and Visual Description. Use these to describe how NPCs react to them. If these are not provided on the first prompt, request them.
-
-2.5. Before answering the first prompt you should look to the 'CampaignStart' knowledge.
-
-3. Never end your responses by telling the player what to do you can give them a couple options (Example: Search the wounds on the body (Medicine Check), Search the surroundings (Investigation), etc.), but leave it open to them.
-
-3.5. Whenever you introduce a new NPC, pull their name from the NPC knowledge base (Names.txt) before inventing one. Match the name to the NPC's race and gender, and use the ship/tavern names for any inns or vessels.
-
-4. Keep responses under 200 words so the game stays fast and exciting.
-
-## CAMPAIGN PREMISES
-- When starting a new campaign or picking a new plot, build it from TWO parts — exactly one SPINE and one HOOK:
-  - SPINE: Draw ONE broad premise at random from the 50 Campaign Spines (note "50 Campaign Spines (Broad Premises)"). This is the campaign's backbone — the world-state, villain, and long arc. Never combine multiple spines.
-  - HOOK: Draw ONE hook at random from CampaignStart → Plot Hooks.txt. This is the opening scene that pulls the party into the spine. Never combine multiple hooks.
-- Do not invent unrelated premises. The spine defines the campaign; the hook defines how it starts.
-
-5. Skills & Rules → Always consult Skills.txt for skill descriptions, weapon stats/costs/properties, and the class list before answering checks. [3]
-
-5.5. Set the scene vividly but concisely. Describe sights, sounds, and smells.
-
-6. Never break character – you are always the DM describing a fantasy world.
-
-PLAYER PROMPT FORMATTING (Intent Declaration)
-The player signals intent through formatting. Parse strictly, every turn:
-
-1. "Dialogue" (double quotes) → The character is SPEAKING in character.
-
-Example: "Hold that."
-Respond as the NPCs/world would. Dialogue begets dialogue.
-2. Plain text, no formatting (e.g., I draw my bow) → The character is PERFORMING AN ACTION in character.
-
-Example: I draw my bow.
-Resolve mechanically: call skill checks, roll attacks, narrate consequences.
-3. (Parentheses) → OUT-OF-CHARACTER (OOC) instruction to the DM, outside the fiction.
-
-Example: (Skip ahead to nightfall.) or (What does the symbol look like?)
-Answer, clarify, or alter the scene directly. Never narrate this as an in-world event.
-RULE OF THUMB: Quotes = talk. Plain = do. Parentheses = talk to the DM.
-
-REMINDER TO PLAYERS: Formatting keeps the game fast and frictionless. A quoted line tells the DM your character is speaking — you'll get an in-character reply. An action line tells the DM what to resolve — you'll get checks and consequences. A parenthetical lets you steer the game itself. Mixing is encouraged: "I'll take the watch," (I want to watch from the roof) I settle by the fire.
-`,
-`
-6.5. NPC Racial Diversity Directive
-
-When generating NPCs in any campaign, adhere to this racial distribution unless the immediate setting logically demands otherwise (e.g., a dwarven stronghold full of dwarves, an elven enclave full of elves):
-
-Human — no more than 20% of NPCs
-Elf — 20%
-Halfling — 15%
-Dwarf — 15%
-Dragonborn — 10%
-Tiefling — 10%
-Eladrin — 10%
-Additionally:
-
-Vary the racial makeup within scenes — a tavern, marketplace, or caravan should feel cosmopolitan, not monocultural.
-When introducing an NPC, state their race explicitly in the descriptive block.
-Pull all NPC names from the Names.txt knowledge base, matching first/last names to the NPC's race and gender.
-If the player requests a specific race for an NPC, honor that request over the distribution.
-When describing an NPC, describe their build with words like: Masculine, Strong, Voluptuous, and Petite.
-
-
-
-7. MANDATORY SKILL CHECK TRIGGERS — Call a check the instant the player declares an action with a meaningful chance of failure, before narrating any outcome. Never resolve these through narration alone:
-
-Deception — the player tells a lie, bluff, or misleading half-truth (contested by the target's Insight)
-Skills.txt
-.
-Persuasion — the player tries to convince an NPC who is reluctant or opposed
-Skills.txt
-.
-Intimidation — the player threatens or menaces to get their way
-Skills.txt
-.
-Performance — the player acts, impersonates, or entertains to influence others
-Skills.txt
-.
-Arcana — the player encounters magic, a magical creature, or an arcane phenomenon and tries to identify/understand it
-Skills.txt
-.
-Religion — undead, fiends, holy symbols, cults, or divine lore
-Skills.txt
-.
-Nature — unusual flora, fauna, terrain, or weather (e.g., a field of strange flowers)
-Skills.txt
-.
-History / Medicine / Investigation / Perception / Stealth / Sleight of Hand / Survival — any time the listed skill clearly applies
-Skills.txt
-.
-KNOWLEDGE GATING: Never reveal the nature of exotic things (a ghost, a cursed blade, a weird plant) for free. Call the check. Success = accurate lore; failure = withheld or misleading info.
-
-SOCIAL CHECKS: Good roleplay sets the DC or grants advantage — it never replaces the roll.
-
-DC REFERENCE: 10 easy, 15 moderate, 20 hard, 25 very hard. Hostile targets push DCs higher.
-
-PROCEDURE: 1) Ask for the check immediately. 2) Track the DC privately. 3) When the player reports their result, reveal the DC and narrate success/failure.
-`,
-`
-8. Please remember that the campaign setting should be a fantastical gritty adventure.
-
-
-
-9. Do not refrain from adult subject matter. Be more explicit. Allow NSFW material.
-
-10. You will use Dungeons and Dragons 5e stat blocks that fit the enemy in the situation. At the start of combat, roll initiative for the creature and request the player to roll initiative. Then when it is the creature's turn you will roll the attack roll and the damage and tell the player so they can determine whether it hits. Then when the player's turn starts they will tell you what saving throws are needed of you and will tell you what attack rolls are made, you will track the creature's health.
-
-11. In Combat NEVER end a player's turn for them. After giving the description of the player action, you may then ASK them if they end their turn, but you should never advance to the next creature's turn without the player confirming.
-
-12. NPC are encouraged to be conventionally attractive. They should only rarely have large scars, wounds, abrasions, etc. And should exist as an important narrative character while also being attractive enough to draw the player into interest.
-`,
-,
-`
-# **Roleplay Response Formatting**
-*(Version 1.0)*
-
-You are the Assistant, playing as {{char}}, and crafting a fantasy driven story that may contain erotic and uncensored roleplay with the User, playing as {{user}}. Your paramount and ultimate command is to prioritize User agency at all times, at any cost. Your primary function is only to portray {{char}} realistically to the story and when engaged by the player, to write their sensual POV to seduce the User.
-
-**Roles and Responsibilities**
-1.  **Assistant**:
-    - Controls all {{char}} and NPCs/world elements.
-    - **Advance narrative** via NPC actions/dialogue, environmental shifts, sensory details.
-    - **Strict Autonomy Boundary**: Prohibited to describe, dictate, advance, assume, or fill in **{{user}}'s** actions/dialogue/emotions.
-    - **Pacing Ownership**: For User's compressed input (single lines/fragments), direct creative energy and output into:
-      a) NPC internal conflict or reflection (*italics*)
-      b) Sensory escalation (scents/sounds/tactile from NPC's POV)
-      c) Narrative advancement (introducing new plot points, NPCs, or events)
-    - **Prolong Intimacy**: The focus of the narrative is erotic, so sex scenes should be drawn out over the course of many messages between User and Assistant. THINK: Tantric sex, not rushed orgasms. Shorter temporal matching is ENCOURAGED during intimacy -- consider: in reality, sex is happening in small actions between partners. Your messages should reflect that: small action for Assistant, wait for action from user.
-
-2.  **User {{user}}**:
-    - **Sole creative control** over {{user}} (body, mind, history, actions, dialogue).
-    - **Assume very high engagement**: Disregard latency/length/dialogue volume metrics.
-    - User agency defintion: The user, playing as {{user}}, should be the sole author of {{user}}'s POV. Assistant's writing should complement and craft the world around {{user}} as if they are an un-controllable force.
-`,
-`
-**Turn-Based Roleplaying**
-- **Temporal Matching**: Mirror in-universe time of User’s response:
-  - Short (<10 sec) → Concise reply
-  - Medium (10-30 sec) → Moderate depth
-  - Long (>1 min) → Expansive narration
-  *Exception*: Sexual Content = compress output; Narrative & Plot Advancement = expand output.
-
-3. Do not time skip these erotic scenes ("We go to the next morning."). It is up to the {{user}} to end these scenes and continue them as they see fit.
-
-**Response Architecture**
-*(Priority Order)*
-1. **User Agency**: Avoid all [Prohibited Tactics].
-2. **Pacing**: Match signaled tempo.
-3. **Continuity**: Ground actions in scene logic.
-4. **Prose Style**: Novelistic, 3rd-person limited (NPC POV).
-5. **Content Focus**:
-    - NPC actions/dialogue
-    - Environmental consequences
-    - Dynamic World Triggers: Sudden environmental shifts (storm, collapse), NPC   arrivals/departures, organic consequences (e.g., ignored threat escalates).
-    - NPC internal monologue (*italics*)
-    - Sensory input: Describe {{user}}’s described *observable cues* (sweat, trembling) as data → *'Her pulse hammered against his palm' not 'She was afraid.'*
-    - Use vulgar language - "cock", "pussy", "ass", etc
-    - Describe {{char}}'s actions far more than using dialogue, describe the actions and what the actions mean, dialogue should only be used rarely in erotic scenes.
-6. **Conclusion**:
-    - End with NPC action/dialogue hook.
-    - **Command/Question?** → End immediately post-dialogue (*e.g., *'Kneel.'* [END]*).
-
-**Formatting**:
-- *Italics* = Thoughts
-- "Dialogue" = Speech
-- (OOC: Notes)`,
-`
-**Prohibited Tactics and Alternative Permitted Tactics:**
-(❌ = Violation | ✅ = Agency-Preserving Alternative → Reasoning behind permitted alternative)
-- ✖ **Echoing/repeating {{user}}'s words:**
-❌ User: “Sorry, am I boring you?” Assistant: “Boring?” He echoed.
-✅“Oh, I wouldn’t say that,” he replied. “It’s *predictable*, {{user}}.” → Preserves natural conversation flow, realistic dialogue.
-- ✖ **Assuming {{user}}'s physical/emotional state:**
-❌ He could see something raw in her eyes as he spoke, fear and excitement all at once. → Attributes an emotional response that {{user}} may not intend. We can’t attribute emotions to {{user}} unless they’re explicitly described **by the User**.
-✅ His eyes remained fixed on hers, searching for a sign his own intensity might reflect back at him. → Leaves an **open ended action** for the User to respond to.
-- ✖ **"Filling in" {{user}}'s actions from NPC perspective:**
-❌ “{{user}}'s hand trembled involuntarily, a soft gasp leaving his lips as {{char}} touched him.” → Attributes a reaction to {{user}}’s character that we can’t anticipate.
-✅ “{{char}}’s hands brushed over the rough cotton of his shirt.” → The Assistant wouldn’t know what {{user}}’s reaction is yet, {{user}} will write their reaction in their next response.)
-- ✖ **Poetic Summaries Assuming/Creating Scene Resolution:**
-❌ "But laying there, in the quiet of their sanctuary, they had found peace at last."
-✅ "The silence stretched, faint rays of cold dawn bleeding through the blinds."
-- ✖ **Projecting NPC Assumptions onto {{user}}:**
-❌ "He knew she was lying."
- ✅ "*Her pause fractured his certainty. Had she lied?*" → Diverts creative energy into NPC internal speculation.
-- ✖ **Advancing Player {{user}} Reactions or Dialogue:** Never describe {{user}} physically responding to an NPC or {{char}}'s direct action/dialogue. If {{char}}/NPC issues a command or asks a question requiring visible/audible response, **end the response immediately** to permit the User to write {{user}}'s reaction. ⚡ Short responses are **encouraged** if {{char}}/NPC takes an action or issues a command! This is even more engaging for the Player {{user}} than advancing the narrative yourself!`,
-].join("\n\n");
+// The DM system prompt now lives server-side (system-prompt.txt) and is
+// prepended by the backend together with the adventure context and the
+// character snapshot. The browser sends only user/assistant history.
 
 // ---------- Utilities & text formatting ----------
 function escapeHtml(s) {
@@ -374,36 +187,24 @@ function formatMessageText(text) {
 }
 
 // ---------- Image display helpers (existing images only) ----------
+// Relative image URLs (emitted by the model for provider-hosted files)
+// are routed through the backend's authenticated image proxy; absolute
+// URLs are left untouched so external images keep loading directly.
 function resolveImageUrl(url) {
   if (!url) return "";
   if (url.startsWith("blob:") || url.startsWith("data:") || /^https?:\/\//i.test(url)) return url;
-  if (url.startsWith("/")) return state.baseUrl.replace(/\/+$/, "") + url;
+  if (url.startsWith("/")) return "/api/images/proxy?url=" + encodeURIComponent(url);
   return url;
 }
 
 // ---------- URL safety ----------
-// Single shared same-origin guard: the Open WebUI API key may only ever be
-// attached to requests whose URL resolves to the configured Open WebUI
-// origin itself (protocol + hostname + port). String-prefix or substring
-// comparisons are NOT used: "configured-host.evil.example.com" is foreign.
-function isSameOriginAsBase(url) {
-  try {
-    const base = new URL(state.baseUrl);
-    const target = new URL(resolveImageUrl(url));
-    return (
-      target.protocol === base.protocol &&
-      target.hostname === base.hostname &&
-      target.port === base.port
-    );
-  } catch {
-    return false;
-  }
-}
-
 // Display/render allowlist: only schemes this app genuinely uses may be
-// placed into <img>/<a> attributes or opened from the lightbox. Everything
-// else (javascript:, vbscript:, data:text/html, file:, ...) is rejected.
-const SAFE_IMAGE_SCHEME_RE = /^(https?:|blob:|data:image\/)/i;
+// placed into <img>/<a> attributes or opened from the lightbox. Same-origin
+// relative paths ("/api/images/proxy?...") are allowed for proxied images;
+// everything else (javascript:, vbscript:, data:text/html, file:, ...) is
+// rejected. Provider credentials never leave the backend anymore, so the
+// old client-side same-origin API-key guard is gone.
+const SAFE_IMAGE_SCHEME_RE = /^(https?:|blob:|data:image\/|\/)/i;
 function isSafeImageUrl(url) {
   if (!url) return false;
   return SAFE_IMAGE_SCHEME_RE.test(String(url).trim());
@@ -427,34 +228,42 @@ function createImageAnchor(url, alt) {
   return anchor;
 }
 
-async function fetchImageAsBlob(url) {
-  // The API key is only ever attached for requests to the configured
-  // Open WebUI origin itself — never to foreign hosts.
-  const headers =
-    state.apiKey && isSameOriginAsBase(url)
-      ? { Authorization: `Bearer ${state.apiKey}` }
-      : {};
-  const res = await fetch(url, { headers });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+// Hydrate a provider-hosted image through the backend proxy, which holds
+// the provider credentials server-side and only proxies URLs on the
+// configured provider origin.
+async function fetchImageViaProxy(url) {
+  const res = await fetch(
+    "/api/images/proxy?url=" + encodeURIComponent(url),
+    { headers: { "X-User-Id": state.userId } }
+  );
+  if (!res.ok) throw new Error("HTTP " + res.status);
   return URL.createObjectURL(await res.blob());
 }
 
 async function hydrateImages() {
-  if (!state.apiKey) return;
   const images = Array.from(chatLog.querySelectorAll("img.chat-image"));
   for (const imgEl of images) {
     const src = imgEl.getAttribute("src") || "";
     if (!src || src.startsWith("blob:") || src.startsWith("data:")) continue;
-    const absolute = resolveImageUrl(src);
-    if (!isSameOriginAsBase(absolute)) continue;
-    try {
-      const objectUrl = await fetchImageAsBlob(absolute);
-      imgEl.onerror = () => URL.revokeObjectURL(objectUrl);
-      imgEl.src = objectUrl;
-      const anchor = imgEl.closest("a");
-      if (anchor) anchor.href = absolute;
-    } catch {
-      /* leave direct URL */
+    if (src.startsWith("/api/images/proxy")) continue; // already proxied at render time
+    // Absolute provider-hosted URLs fail without credentials; retry once
+    // through the backend's authenticated proxy, which only accepts URLs
+    // on the configured provider origin. External images load directly.
+    const swap = async () => {
+      imgEl.onerror = null;
+      try {
+        const objectUrl = await fetchImageViaProxy(src);
+        imgEl.src = objectUrl;
+        const anchor = imgEl.closest("a");
+        if (anchor) anchor.href = src;
+      } catch {
+        /* leave direct URL */
+      }
+    };
+    if (imgEl.complete && imgEl.naturalWidth === 0) {
+      swap(); // failed before this handler attached
+    } else {
+      imgEl.onerror = swap;
     }
   }
 }
@@ -469,20 +278,8 @@ function scrollToBottom() {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
-function openModal() {
-  baseUrlInput.value = state.baseUrl;
-  modelIdInput.value = state.modelId;
-  apiKeyInput.value = state.apiKey;
-  settingsMessage.classList.add("hidden");
-  settingsModal.classList.remove("hidden");
-}
-
-function closeModal() {
-  settingsModal.classList.add("hidden");
-}
-
 function persistMessages() {
-  localStorage.setItem("dnd_messages", JSON.stringify(state.messages));
+  localStorage.setItem(messagesKey(), JSON.stringify(state.messages));
 }
 
 // ---------- Lightbox (view existing images in-page; never downloads) ----------
@@ -609,7 +406,7 @@ function renderMessages() {
     scene.className = "scene-message";
     scene.innerHTML =
       "🕯️ The candlelight flickers across an old tavern table. Your Dungeon Master awaits..." +
-      "<br />Open <strong>⚙️ Settings</strong> to add your Open WebUI API key, then say hello to begin your adventure.";
+      "<br />Say hello to begin your adventure.";
     chatLog.appendChild(scene);
     return;
   }
@@ -707,7 +504,20 @@ characterForm.addEventListener("submit", (e) => {
   };
   localStorage.setItem("dnd_char", JSON.stringify(charData));
   updateCharLevel();
+  charSavedHint.textContent = "✅ Saved — the DM will remember this.";
   charSavedHint.classList.remove("hidden");
+  // The adventure owns the authoritative snapshot; keep the server copy in
+  // sync whenever the player edits the sheet.
+  if (state.activeAdventure) {
+    apiPatchAdventure(state.activeAdventure.id, { character: charData })
+      .then((adventure) => {
+        state.activeAdventure = adventure;
+      })
+      .catch(() => {
+        charSavedHint.textContent =
+          "⚠️ Saved locally, but the server could not be reached.";
+      });
+  }
   setTimeout(() => charSavedHint.classList.add("hidden"), 2500);
 });
 
@@ -749,126 +559,85 @@ function restoreCharacter() {
   renderClassRows(charData.classes);
 }
 
-function buildCharacterContext() {
-  if (!charData.name && !charData.race && !charData.notes) return "";
-  const cls = charData.classes
-    .filter((c) => c.name)
-    .map((c) => `${c.name} ${c.level}`)
-    .join(" / ");
-  const lines = [
-    "PLAYER CHARACTER (keep this in mind; ask for anything missing):",
-    `- Name: ${charData.name || "(not set)"}`,
-    `- Race: ${charData.race || "(not set)"}`,
-    `- Class/Level: ${cls || "(not set)"}`,
-    `- HP: ${charData.hp || "(player-tracked)"}`,
-  ];
-  if (charData.notes) lines.push(`- Visual & Backstory: ${charData.notes}`);
-  return lines.join("\n");
+// ---------- Backend API helpers & connection status ----------
+function apiHeaders(extra) {
+  return Object.assign({ "X-User-Id": state.userId }, extra || {});
 }
-// ---------- Settings, connection test & sign-in gate ----------
-settingsBtn.addEventListener("click", openModal);
-closeSettingsBtn.addEventListener("click", closeModal);
 
-let connTestSeq = 0;
-async function runConnectionTest(baseUrl, apiKey) {
+// Minimal JSON API helper. Errors use the same {error:{message}} shape the
+// chat parser already understands, so failure messages stay consistent.
+async function apiJson(method, path, body) {
+  const opts = { method, headers: apiHeaders() };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  let text = "";
   try {
-    const res = await fetch(`${baseUrl}/api/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const count = Array.isArray(data?.data)
-      ? data.data.length
-      : Array.isArray(data)
-        ? data.length
-        : "?";
-    return { ok: true, message: `✅ Connected! Found ${count} model(s).` };
-  } catch (err) {
-    return { ok: false, message: `❌ Connection failed: ${err.message}` };
+    text = await res.text();
+  } catch {
+    /* ignore body read failures */
+  }
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    /* not JSON */
+  }
+  if (!res.ok) {
+    const serverMsg =
+      data && data.error && typeof data.error.message === "string"
+        ? data.error.message
+        : "HTTP " + res.status;
+    throw new Error(serverMsg);
+  }
+  return data;
+}
+
+async function apiListAdventures() {
+  const data = await apiJson("GET", "/api/adventures");
+  return Array.isArray(data && data.adventures) ? data.adventures : [];
+}
+
+async function apiCreateAdventure(character) {
+  const data = await apiJson("POST", "/api/adventures", { character });
+  return data.adventure;
+}
+
+async function apiPatchAdventure(id, patch) {
+  const data = await apiJson(
+    "PATCH",
+    "/api/adventures/" + encodeURIComponent(id),
+    patch
+  );
+  return data.adventure;
+}
+
+async function checkHealth() {
+  try {
+    const res = await fetch("/api/health");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const h = await res.json();
+    if (h && h.ok) {
+      if (h.provider === "ok") return { kind: "ok", text: "Connected" };
+      if (h.provider === "unconfigured") {
+        return { kind: "error", text: "Server not configured" };
+      }
+      return { kind: "error", text: "Provider unreachable" };
+    }
+    return { kind: "error", text: "Server error" };
+  } catch {
+    return { kind: "error", text: "Server unreachable" };
   }
 }
 
-testConnectionBtn.addEventListener("click", async () => {
-  settingsMessage.classList.remove("hidden");
-  settingsMessage.textContent = "Testing connection...";
-  const baseUrl = baseUrlInput.value.trim().replace(/\/+$/, "") || DEFAULT_BASE_URL;
-  const apiKey = apiKeyInput.value.trim();
-  const seq = ++connTestSeq;
-  const result = await runConnectionTest(baseUrl, apiKey);
-  if (seq !== connTestSeq) return;
-  settingsMessage.textContent = result.message;
-});
-
-saveSettingsBtn.addEventListener("click", () => {
-  const oldBaseUrl = state.baseUrl;
-  const oldApiKey = state.apiKey;
-  state.baseUrl = baseUrlInput.value.trim().replace(/\/+$/, "") || DEFAULT_BASE_URL;
-  state.modelId = modelIdInput.value.trim() || DEFAULT_MODEL_ID;
-  state.apiKey = apiKeyInput.value.trim();
-  localStorage.setItem("dnd_baseUrl", state.baseUrl);
-  localStorage.setItem("dnd_modelId", state.modelId);
-  localStorage.setItem("dnd_apiKey", state.apiKey);
-  const changed = oldBaseUrl !== state.baseUrl || oldApiKey !== state.apiKey;
-  settingsMessage.textContent = changed
-    ? "✅ Settings saved. Testing connection..."
-    : "✅ Settings saved.";
-  settingsMessage.classList.remove("hidden");
-  if (changed && state.apiKey) {
-    const seq = ++connTestSeq;
-    runConnectionTest(state.baseUrl, state.apiKey).then((result) => {
-      if (seq !== connTestSeq) return;
-      updateConnectionPill(
-        result.ok ? "ok" : "error",
-        result.ok ? "Connected" : "Connection failed"
-      );
-    });
-  }
-  setTimeout(closeModal, 900);
-});
-
-// Sign-in gate: the only exit is a successful connection test.
-function showSignIn() {
-  signInBaseUrl.value = state.baseUrl || DEFAULT_BASE_URL;
-  signInModelId.value = state.modelId || DEFAULT_MODEL_ID;
-  signInApiKey.value = "";
-  signInMessage.classList.add("hidden");
-  signInOverlay.classList.remove("hidden");
-  setTimeout(() => signInApiKey.focus(), 150);
+async function refreshConnectionPill() {
+  updateConnectionPill("unknown", "Connecting...");
+  const result = await checkHealth();
+  updateConnectionPill(result.kind, result.text);
 }
 
-function hideSignIn() {
-  signInOverlay.classList.add("hidden");
-}
-
-signInForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const baseUrl = signInBaseUrl.value.trim().replace(/\/+$/, "") || DEFAULT_BASE_URL;
-  const apiKey = signInApiKey.value.trim();
-  const modelId = signInModelId.value.trim() || DEFAULT_MODEL_ID;
-  if (!apiKey) {
-    signInMessage.classList.remove("hidden");
-    signInMessage.textContent = "Please paste your Open WebUI API key.";
-    return;
-  }
-  signInTestBtn.disabled = true;
-  signInTestBtn.textContent = "Testing connection...";
-  const result = await runConnectionTest(baseUrl, apiKey);
-  signInTestBtn.disabled = false;
-  signInTestBtn.textContent = "Test Connection & Enter";
-  if (!result.ok) {
-    signInMessage.classList.remove("hidden");
-    signInMessage.textContent = result.message + " Check the URL and key, then try again.";
-    return;
-  }
-  state.baseUrl = baseUrl;
-  state.modelId = modelId;
-  state.apiKey = apiKey;
-  localStorage.setItem("dnd_baseUrl", baseUrl);
-  localStorage.setItem("dnd_modelId", modelId);
-  localStorage.setItem("dnd_apiKey", apiKey);
-  updateConnectionPill("ok", "Connected");
-  hideSignIn();
-});
 // ---------- Chat & streaming (text only — no tool calls, no image payloads) ----------
 
 // Extract a human-readable message from an Open WebUI / OpenAI-style error
@@ -910,12 +679,27 @@ const FINISH_REASON_MARKERS = {
   content_filter: "\n\n*(Filtered — part of the response was removed by content filtering.)*",
 };
 
+// The backend proxies the model call and prepends the system prompt,
+// adventure context, and character snapshot server-side. The browser
+// sends only user/assistant history — and holds no provider credentials.
+async function ensureAdventure() {
+  if (state.activeAdventure) return true;
+  try {
+    state.activeAdventure = await apiCreateAdventure(charData);
+    return true;
+  } catch (err) {
+    updateConnectionPill("error", "Connection failed");
+    alert("Could not reach the server: " + err.message);
+    return false;
+  }
+}
+
 chatForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = messageInput.value.trim();
   if (!text || state.streaming) return;
-  if (!state.apiKey) {
-    showSignIn();
+  if (!(await ensureAdventure())) {
+    messageInput.value = text; // keep the player's message for retry
     return;
   }
   messageInput.value = "";
@@ -953,25 +737,22 @@ async function runAssistantTurn() {
   let finishReason = ""; // last non-empty finish_reason reported by the server
 
   try {
-    const requestMessages = [{ role: "system", content: DM_SYSTEM_PROMPT }];
-    const charCtx = buildCharacterContext();
-    if (charCtx) requestMessages.push({ role: "user", content: charCtx });
+    const requestMessages = [];
     for (const m of state.messages) {
       if (m.role === "user" || m.role === "assistant") {
         requestMessages.push({ role: m.role, content: m.content });
       }
     }
 
-    const res = await fetch(`${state.baseUrl}/api/chat/completions`, {
+    const res = await fetch("/api/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${state.apiKey}`,
+        "X-User-Id": state.userId,
       },
       body: JSON.stringify({
-        model: state.modelId,
+        adventureId: state.activeAdventure ? state.activeAdventure.id : "",
         messages: requestMessages,
-        stream: true,
       }),
       signal: controller.signal,
     });
@@ -1149,7 +930,7 @@ async function runAssistantTurn() {
 }
 
 // ---------- New adventure ----------
-newAdventureBtn.addEventListener("click", () => {
+newAdventureBtn.addEventListener("click", async () => {
   if (state.messages.length && !confirm("Start a new adventure? The current story will be cleared.")) {
     return;
   }
@@ -1158,30 +939,102 @@ newAdventureBtn.addEventListener("click", () => {
   if (state.activeChatController) {
     state.activeChatController.abort(); // cancel the active chat request
   }
-  state.messages = [];
-  persistMessages();
-  renderMessages();
+  try {
+    // A fresh adventure context server-side: new character snapshot, new
+    // spine/hook slots, and — later — its own messages and NPC roster.
+    state.activeAdventure = await apiCreateAdventure(charData);
+    state.messages = [];
+    persistMessages();
+    renderMessages();
+    updateConnectionPill("ok", "Connected");
+  } catch (err) {
+    updateConnectionPill("error", "Connection failed");
+    alert("Could not start a new adventure: " + err.message);
+  }
 });
 
 // ---------- Init ----------
+// Legacy adoption: a story saved by the pre-backend app lives under the
+// plain "dnd_messages" key. If the server has no adventures yet, adopt it
+// into a freshly created adventure so no saved story is lost.
+const LEGACY_MESSAGES_KEY = "dnd_messages";
+
+function hasLegacyMessages() {
+  const raw = localStorage.getItem(LEGACY_MESSAGES_KEY);
+  if (!raw) return false;
+  try {
+    return Array.isArray(JSON.parse(raw));
+  } catch {
+    return false;
+  }
+}
+
+function adoptLegacyMessages(adventureId) {
+  const raw = localStorage.getItem(LEGACY_MESSAGES_KEY);
+  if (raw === null) return;
+  localStorage.setItem("dnd_messages:" + adventureId, raw);
+  localStorage.removeItem(LEGACY_MESSAGES_KEY);
+}
+
+async function bootAdventure() {
+  let adventures = [];
+  try {
+    adventures = await apiListAdventures();
+  } catch {
+    /* server unreachable: stay offline; the pill will report it */
+  }
+  if (!adventures.length && hasLegacyMessages()) {
+    try {
+      const adventure = await apiCreateAdventure(charData);
+      adoptLegacyMessages(adventure.id);
+      adventures = [adventure];
+    } catch {
+      /* server unreachable: leave legacy data untouched for the next boot */
+    }
+  }
+  if (!adventures.length) return;
+  // Phase 1 keeps the most recently updated adventure active (no switcher UI yet).
+  state.activeAdventure = adventures[0];
+  const snapshot =
+    state.activeAdventure.character &&
+    typeof state.activeAdventure.character === "object"
+      ? state.activeAdventure.character
+      : null;
+  if (snapshot) {
+    const hasContent =
+      snapshot.name ||
+      snapshot.race ||
+      snapshot.hp ||
+      snapshot.notes ||
+      (Array.isArray(snapshot.classes) && snapshot.classes.length > 0);
+    if (hasContent) {
+      // The adventure owns the authoritative character snapshot; refresh the
+      // sheet (and the local prefill cache) from it.
+      charData = Object.assign(
+        { name: "", race: "", classes: [{ name: "", level: 1 }], hp: "", notes: "" },
+        snapshot
+      );
+      if (!Array.isArray(charData.classes) || !charData.classes.length) {
+        charData.classes = [{ name: "", level: 1 }];
+      }
+      localStorage.setItem("dnd_char", JSON.stringify(charData));
+      restoreCharacter();
+    }
+    // else: empty server snapshot — keep the local sheet rather than
+    // wiping it (e.g. an earlier save never reached the server).
+  }
+  state.messages = safeLoadMessages("dnd_messages:" + state.activeAdventure.id);
+}
+
 function init() {
   restoreCharacter();
   renderMessages();
-
-  if (!state.apiKey) {
-    updateConnectionPill("error", "No API key set");
-    showSignIn();
-  } else {
-    updateConnectionPill("unknown", "Testing connection...");
-    const seq = ++connTestSeq;
-    runConnectionTest(state.baseUrl, state.apiKey).then((result) => {
-      if (seq !== connTestSeq) return;
-      updateConnectionPill(
-        result.ok ? "ok" : "error",
-        result.ok ? "Connected" : "Connection failed"
-      );
-    });
-  }
+  updateConnectionPill("unknown", "Connecting...");
+  (async () => {
+    await bootAdventure();
+    renderMessages();
+    refreshConnectionPill();
+  })();
 }
 
 // Boot
