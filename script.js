@@ -42,6 +42,8 @@ const state = {
   apiKey: localStorage.getItem("dnd_apiKey") || "",
   messages: safeLoadMessages(),
   streaming: false,
+  activeChatController: null, // AbortController for the in-flight chat request
+  turnSeq: 0, // bumped by New Adventure to invalidate stale turns
 };
 
 // ---------- DOM refs ----------
@@ -868,6 +870,46 @@ signInForm.addEventListener("submit", async (e) => {
   hideSignIn();
 });
 // ---------- Chat & streaming (text only — no tool calls, no image payloads) ----------
+
+// Extract a human-readable message from an Open WebUI / OpenAI-style error
+// body or SSE error event. Recognizes {error:{message}}, error as a string,
+// {detail}, and {message}. Returns "" when nothing recognizable is present.
+function extractServerError(body) {
+  if (body === undefined || body === null) return "";
+  let parsed = body;
+  if (typeof body === "string") {
+    const text = body.trim();
+    if (!text) return "";
+    if (text.startsWith("<")) return ""; // HTML gateway page: not an error message
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return text.slice(0, 300); // plain-text server message
+    }
+  }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const e = parsed.error;
+    if (e !== undefined && e !== null) {
+      if (typeof e === "string" && e) return e;
+      if (e && typeof e === "object" && typeof e.message === "string" && e.message) {
+        return e.message;
+      }
+    }
+    if (typeof parsed.detail === "string" && parsed.detail) return parsed.detail;
+    if (typeof parsed.message === "string" && parsed.message) return parsed.message;
+    return "";
+  }
+  return typeof parsed === "string" ? parsed.slice(0, 300) : "";
+}
+
+// Persisted markers appended to truncated/interrupted replies. They are part
+// of the saved message content, so they survive reloads.
+const INTERRUPTION_MARKER = "\n\n*(Interrupted — the connection was lost.)*";
+const FINISH_REASON_MARKERS = {
+  length: "\n\n*(Truncated — the response hit the length limit.)*",
+  content_filter: "\n\n*(Filtered — part of the response was removed by content filtering.)*",
+};
+
 chatForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = messageInput.value.trim();
@@ -888,15 +930,27 @@ async function runAssistantTurn() {
   typingIndicator.classList.remove("hidden");
   messageInput.disabled = true;
 
+  // Own the cancellation + staleness guard for this turn. New Adventure
+  // bumps turnSeq and aborts the controller, which guarantees nothing from
+  // this turn can write into the reset adventure afterwards.
+  const controller = new AbortController();
+  state.activeChatController = controller;
+  const turnSeq = state.turnSeq;
+  const turnStillCurrent = () => turnSeq === state.turnSeq;
+
   const bubble = appendMessageBubble("assistant", "");
   const textEl = bubble.querySelector(".message-text");
   let acc = "";
   const appendText = (t) => {
     if (!t) return;
+    if (!turnStillCurrent()) return; // stale turn: never touch the new DOM
     acc += t;
     textEl.innerHTML = formatMessageText(acc);
     scrollToBottom();
   };
+
+  let streamError = ""; // real server error reported inside the SSE stream
+  let finishReason = ""; // last non-empty finish_reason reported by the server
 
   try {
     const requestMessages = [{ role: "system", content: DM_SYSTEM_PROMPT }];
@@ -919,52 +973,174 @@ async function runAssistantTurn() {
         messages: requestMessages,
         stream: true,
       }),
+      signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`.trim());
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (!line.startsWith("data:")) continue;
+    if (!res.ok) {
+      // Surface the real server error message when the body carries one;
+      // fall back to the bare HTTP status line otherwise.
+      let bodyText = "";
+      try {
+        bodyText = await res.text();
+      } catch {
+        /* body read failure: fall back to status line */
+      }
+      const serverMsg = extractServerError(bodyText);
+      throw new Error(
+        serverMsg
+          ? `HTTP ${res.status}: ${serverMsg}`
+          : `HTTP ${res.status} ${res.statusText}`.trim()
+      );
+    }
+
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("text/event-stream")) {
+      // A 200 that is not an event stream. Surface a real error if the body
+      // carries one; otherwise accept a plain JSON completion body (some
+      // servers ignore stream:true). Anything else is a protocol failure —
+      // never the fake "silence" fallback.
+      let bodyText = "";
+      try {
+        bodyText = await res.text();
+      } catch {
+        /* ignore body read failures */
+      }
+      const serverMsg = extractServerError(bodyText);
+      if (serverMsg) throw new Error(serverMsg);
+      let parsed = null;
+      try {
+        parsed = JSON.parse(bodyText);
+      } catch {
+        /* not JSON */
+      }
+      const choice = parsed && parsed.choices ? parsed.choices[0] : null;
+      const msg = choice ? choice.message || choice : {};
+      const fullContent = typeof msg.content === "string" ? msg.content : "";
+      if (fullContent) {
+        appendText(fullContent);
+        if (choice && choice.finish_reason) finishReason = String(choice.finish_reason);
+      } else {
+        throw new Error("The server returned an unexpected non-stream response.");
+      }
+    } else {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let streamEnded = false;
+
+      const processLine = (rawLine) => {
+        const line = rawLine.trim();
+        if (!line.startsWith("data:")) return;
         const data = line.slice(5).trim();
-        if (data === "[DONE]") continue;
+        if (!data) return;
+        if (data === "[DONE]") {
+          streamEnded = true; // finish immediately; do not wait for socket close
+          return;
+        }
+        let json;
         try {
-          const json = JSON.parse(data);
-          const choice = json.choices && json.choices[0];
-          if (!choice) continue;
-          const msg = choice.delta || choice.message || {};
-          if (typeof msg.content === "string" && msg.content) appendText(msg.content);
+          json = JSON.parse(data);
         } catch {
-          /* keep-alive / partial */
+          return; /* keep-alive / partial / malformed chunk */
+        }
+        const evErr = extractServerError(json);
+        if (evErr) {
+          // Error object inside the stream: capture the real message instead
+          // of silently treating the partial text as a complete reply.
+          streamError = evErr;
+          return;
+        }
+        const choice = json.choices && json.choices[0];
+        if (!choice) return;
+        if (choice.finish_reason) finishReason = String(choice.finish_reason);
+        const msg = choice.delta || choice.message || {};
+        if (typeof msg.content === "string" && msg.content) appendText(msg.content);
+      };
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          processLine(line);
+          if (streamEnded) break;
+        }
+        if (streamEnded) break;
+      }
+      if (!streamEnded) {
+        // EOF: flush the decoder and process a final data line that arrived
+        // without a trailing newline so its content is never lost.
+        buf += decoder.decode();
+        if (buf.trim()) processLine(buf);
+      }
+      if (streamEnded) {
+        try {
+          await reader.cancel(); // release the connection instead of waiting
+        } catch {
+          /* already released */
         }
       }
     }
 
-    if (!acc.trim()) {
-      acc = "*(The Dungeon Master stares in silence — the connection may have dropped.)*";
-      appendText(acc);
+    // ---------- Turn finished: commit (or deliberately not) ----------
+    if (!turnStillCurrent()) return; // reset happened: leave no trace
+
+    if (streamError) {
+      // The server reported an error mid-stream. Preserve any partial text
+      // with a persisted interruption/error marker; never invent DM dialogue.
+      updateConnectionPill("error", "Connection failed");
+      if (acc.trim()) {
+        acc += `\n\n*(Interrupted — the server reported an error: ${streamError})*`;
+        textEl.innerHTML = formatMessageText(acc);
+        state.messages.push({ role: "assistant", content: acc });
+        persistMessages();
+        hydrateImages();
+      } else {
+        appendText(`⚠️ ${streamError}`);
+      }
+      return;
     }
+
+    if (!acc.trim()) {
+      // Genuinely successful but empty response: the silence fallback, once.
+      acc = "*(The Dungeon Master stares in silence — the connection may have dropped.)*";
+      textEl.innerHTML = formatMessageText(acc);
+    } else if (finishReason && finishReason !== "stop") {
+      const marker = FINISH_REASON_MARKERS[finishReason];
+      if (marker) {
+        acc += marker;
+        textEl.innerHTML = formatMessageText(acc);
+      }
+    }
+    updateConnectionPill("ok", "Connected");
     state.messages.push({ role: "assistant", content: acc });
     persistMessages();
     hydrateImages();
   } catch (err) {
-    const note = `⚠️ Connection problem: ${err.message}`;
-    if (acc.trim()) {
-      state.messages.push({ role: "assistant", content: acc });
-      persistMessages();
-      appendText(`\n\n${note}`);
+    if (err && err.name === "AbortError") {
+      // Intentionally cancelled (New Adventure): no error UI, no history.
+    } else if (!turnStillCurrent()) {
+      // Stale turn after a reset: the new adventure stays untouched.
     } else {
-      appendText(note);
+      updateConnectionPill("error", "Connection failed");
+      if (acc.trim()) {
+        // Preserve the partial text with a persisted interruption marker so
+        // a reload never shows it as a successful complete response.
+        acc += INTERRUPTION_MARKER;
+        state.messages.push({ role: "assistant", content: acc });
+        persistMessages();
+        appendText(`\n\n⚠️ Connection problem: ${err.message}`);
+      } else {
+        appendText(`⚠️ Connection problem: ${err.message}`);
+      }
     }
   } finally {
+    if (state.activeChatController === controller) {
+      state.activeChatController = null;
+    }
     state.streaming = false;
     typingIndicator.classList.add("hidden");
     messageInput.disabled = false;
@@ -978,6 +1154,10 @@ newAdventureBtn.addEventListener("click", () => {
     return;
   }
   if (ttsSupported) window.speechSynthesis.cancel();
+  state.turnSeq++; // invalidate any in-flight turn so it can never write back
+  if (state.activeChatController) {
+    state.activeChatController.abort(); // cancel the active chat request
+  }
   state.messages = [];
   persistMessages();
   renderMessages();
